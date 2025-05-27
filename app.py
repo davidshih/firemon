@@ -1,296 +1,347 @@
 import os
 import json
 import logging
+import time
+from typing import Dict, Optional, Tuple, Any
+from functools import wraps
+import pandas as pd
 import requests
 import urllib3
-import pandas as pd
 from dotenv import load_dotenv
 
-# 設定日誌 (Log)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-# --- 資安警告：請在生產環境中移除此行並確保 SSL 憑證有效 ---
-# 這行會關閉 urllib3 發出的不安全請求警告，因為 requests 在 verify=False 時會用到 urllib3
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-# -----------------------------------------------------------
 
-# 全域變數，用於快取 API Token
-# TOKEN 應該在成功認證後被設定
-API_TOKEN = None
+class FireMonAPIError(Exception):
+    """FireMon API 相關的自訂例外類別"""
+    pass
 
-def load_config():
-    """
-    載入環境變數中的 FireMon API 設定。
-    這些設定應該放在 .env 檔案中，例如：
-    FIREMON_BASE_URL="https://your-firemon-instance.com"
-    FIREMON_USER_ID="your_username"
-    FIREMON_PASSWORD="your_password"
-    FIREMON_DOMAIN_ID="your_domain_id" # 假設有個DOMAIN_ID
-    """
-    load_dotenv()
-    base_url = os.getenv("FIREMON_BASE_URL")
-    user_id = os.getenv("FIREMON_USER_ID")
-    password = os.getenv("FIREMON_PASSWORD")
-    domain_id = os.getenv("FIREMON_DOMAIN_ID")
 
-    if not all([base_url, user_id, password, domain_id]):
-        logger.error("錯誤：FireMon API 設定（BASE_URL, USER_ID, PASSWORD, DOMAIN_ID）未在 .env 檔案中完整設定。")
-        raise ValueError("缺少必要的環境變數。請檢查 .env 檔案。")
+class FireMonAuthError(FireMonAPIError):
+    """認證相關的例外類別"""
+    pass
+
+
+class FireMonRequestError(FireMonAPIError):
+    """請求相關的例外類別"""
+    pass
+
+
+def retry_on_failure(max_attempts: int = 3, delay: float = 1.0):
+    """重試裝飾器，用於處理暫時性的 API 失敗"""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            for attempt in range(max_attempts):
+                try:
+                    return func(*args, **kwargs)
+                except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                    last_exception = e
+                    if attempt < max_attempts - 1:
+                        logger.warning(f"嘗試 {attempt + 1}/{max_attempts} 失敗: {e}. 等待 {delay} 秒後重試...")
+                        time.sleep(delay)
+                    else:
+                        logger.error(f"所有 {max_attempts} 次嘗試都失敗了")
+            raise last_exception
+        return wrapper
+    return decorator
+
+
+class FireMonClient:
+    """FireMon API 客戶端類別"""
     
-    return base_url, user_id, password, domain_id
-
-def get_auth_token(base_url, user_id, password):
-    """
-    獲取 FireMon API 的認證 Token。
-    首次呼叫會進行認證，之後會使用快取的 Token (如果有的話)。
-    """
-    global API_TOKEN # 宣告使用全域變數
-
-    if API_TOKEN:
-        logger.info("使用已快取的 API Token。")
-        return API_TOKEN
-
-    url = f"{base_url}/securitymanager/api/authentication/login"
-    auth_headers = {"Content-Type": "application/json; charset=utf-8"}
-    auth_payload = json.dumps({"username": user_id, "password": password}) # 使用 json.dumps 將字典轉為 JSON 字串
-
-    logger.info("嘗試獲取 FireMon API 認證 Token...")
-    try:
-        response = requests.post(url, headers=auth_headers, data=auth_payload, verify=False) # 再次強調 verify=False
-        response.raise_for_status()  # 如果狀態碼是 4xx/5xx，拋出 HTTPError
+    def __init__(self, base_url: str, user_id: str, password: str, domain_id: str):
+        self.base_url = base_url.rstrip('/')
+        self.user_id = user_id
+        self.password = password
+        self.domain_id = domain_id
+        self._token: Optional[str] = None
+        self.session = requests.Session()
+        self.session.verify = False
+        self.session.headers.update({
+            "Content-Type": "application/json; charset=utf-8"
+        })
+    
+    @property
+    def token(self) -> str:
+        """獲取或刷新認證 Token"""
+        if not self._token:
+            self._authenticate()
+        return self._token
+    
+    @retry_on_failure(max_attempts=3, delay=2.0)
+    def _authenticate(self) -> None:
+        """執行 FireMon API 認證"""
+        url = f"{self.base_url}/securitymanager/api/authentication/login"
+        payload = {"username": self.user_id, "password": self.password}
         
-        auth_token_data = response.json() # 直接使用 .json() 解析回應
-        token = auth_token_data.get("token")
-
-        if token:
-            API_TOKEN = token # 快取 Token
+        logger.info("正在進行 FireMon API 認證...")
+        try:
+            response = self.session.post(url, json=payload)
+            response.raise_for_status()
+            
+            auth_data = response.json()
+            token = auth_data.get("token")
+            
+            if not token:
+                raise FireMonAuthError(f"認證回應中未包含 token: {auth_data}")
+            
+            self._token = token
+            self.session.headers.update({"X-FM-Auth-Token": token})
             logger.info("FireMon API 認證成功！")
-            return token
-        else:
-            logger.error(f"認證失敗：無法從回應中獲取 Token。回應：{response.text}")
-            return None
-
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"認證失敗：HTTP 錯誤：{e.response.status_code} - {e.response.text}")
-    except requests.exceptions.RequestException as e:
-        logger.error(f"認證失敗：請求錯誤：{e}")
-    except Exception as e:
-        logger.error(f"認證失敗：未知錯誤：{e}")
-    return None
-
-def update_ticket_variables(base_url, domain_id, ticket_id, workflow_id, packet_task_id, variables_to_update, token):
-    """
-    通用函數：更新 FireMon 票證的變數。
-    """
-    url = f"{base_url}/policysoptimizer/api/v2/workflow/{workflow_id}@{domain_id}/packet/{packet_task_id}/task/{ticket_id}"
-    headers = {
-        "Content-Type": "application/json; charset=utf-8",
-        "X-FM-Auth-Token": token
-    }
+            
+        except requests.exceptions.HTTPError as e:
+            raise FireMonAuthError(f"認證失敗 (HTTP {e.response.status_code}): {e.response.text}")
+        except requests.exceptions.RequestException as e:
+            raise FireMonAuthError(f"認證請求失敗: {e}")
     
-    # 這裡假設 variables_to_update 是一個字典，直接包含要更新的 key-value 對
-    # 並且 ticket_list 中的每個 data 項目已經包含了 ticket_id, workflow_id, packet_task_id
-    # FireMon API 的 payload 可能需要包含所有 variables，而不僅僅是更新的部分
-    # 因此，理想情況下，應該先 GET 取得現有的 variables，然後合併或修改
-    # 為簡化範例，這裡假設直接傳送一個包含修改後變數的 payload
-    
-    # 根據 Part 2 的邏輯，payload 應該是 {"variables": {...}}
-    # 所以我們需要把 variables_to_update 包裝進去
-    payload = {"variables": variables_to_update}
-
-    logger.info(f"正在更新 Ticket ID: {ticket_id} 的變數...")
-    try:
-        response = requests.put(url, headers=headers, json=payload, verify=False)
-        response.raise_for_status()
-        logger.info(f"Ticket ID: {ticket_id} 變數更新成功。狀態碼: {response.status_code}")
-        return True
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"更新 Ticket ID: {ticket_id} 失敗：HTTP 錯誤：{e.response.status_code} - {e.response.text}")
-    except requests.exceptions.RequestException as e:
-        logger.error(f"更新 Ticket ID: {ticket_id} 失敗：請求錯誤：{e}")
-    return False
-
-def assign_ticket(base_url, domain_id, ticket_id, workflow_id, packet_task_id, assigned_user_id, token):
-    """
-    處理指派票證的專用 API 呼叫。
-    """
-    # 根據 Part 1 的 assign_ticket URL
-    url = f"{base_url}/policysoptimizer/api/v2/workflow/{workflow_id}@{domain_id}/packet/{packet_task_id}/task/{ticket_id}/assign"
-    headers = {
-        "Content-Type": "application/json", # 這個可能要看 API 文件，是 text/plain 還是 json
-        "X-FM-Auth-Token": token
-    }
-    # 指派的 payload 結構可能根據 FireMon API 而異，這裡假設需要 assignedTo 這個 key
-    # 實際可能需要更複雜的結構，例如包含 User ID 或其他資訊
-    payload = json.dumps({"assignedTo": assigned_user_id}) 
-
-    logger.info(f"正在指派 Ticket ID: {ticket_id} 給使用者: {assigned_user_id}...")
-    try:
-        response = requests.put(url, headers=headers, data=payload, verify=False) # data=payload 因為是 json.dumps 過的
-        response.raise_for_status()
-        logger.info(f"Ticket ID: {ticket_id} 指派成功。狀態碼: {response.status_code}")
-        return True
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"指派 Ticket ID: {ticket_id} 失敗：HTTP 錯誤：{e.response.status_code} - {e.response.text}")
-    except requests.exceptions.RequestException as e:
-        logger.error(f"指派 Ticket ID: {ticket_id} 失敗：請求錯誤：{e}")
-    return False
-
-def complete_ticket(base_url, domain_id, ticket_id, workflow_id, packet_task_id, new_status, token):
-    """
-    處理完成票證 (或更新票證狀態) 的專用 API 呼叫。
-    這裡假設更新狀態也是透過修改 variables 實現，但為了通用性，可以有專屬函數
-    """
-    # 假設完成票證也透過 update_ticket_variables 實現，只是變數為 new_status
-    # 或者 FireMon 有專門的 /complete 或 /status API
-    # 這裡以修改 ticket 的 status 變數為例，實際可能需要查詢 API 文件
-    
-    # 為了簡化，我們假設 FireMon API 允許你直接設定 ticket_status
-    # 如果是通過 variables 更新，應該是 update_ticket_variables 的範疇
-    # 這裡創建一個假設的專用完成 API
-    url = f"{base_url}/policysoptimizer/api/v2/workflow/{workflow_id}@{domain_id}/packet/{packet_task_id}/task/{ticket_id}"
-    headers = {
-        "Content-Type": "application/json; charset=utf-8",
-        "X-FM-Auth-Token": token
-    }
-    # 假設 API 接收 {"status": "NewStatus"} 或 {"variables": {"status": "NewStatus"}}
-    # 這裡我們假設需要傳送所有變數，包含新的 status
-    
-    # 你需要先獲取當前票證的所有變數，然後修改 status
-    # 為了避免在每次呼叫中都 GET，這裡直接構建一個包含 status 的 payload
-    # 這可能需要更精確的 API 文件說明，或者先 GET 再 PUT
-    payload = {
-        "variables": {
-            "status": new_status # 假設變數名稱是 "status"
-            # 如果還有其他變數需要保留，你需要先 GET 獲取它們
-        }
-    }
-    
-    logger.info(f"正在將 Ticket ID: {ticket_id} 狀態更新為: {new_status}...")
-    try:
-        response = requests.put(url, headers=headers, json=payload, verify=False)
-        response.raise_for_status()
-        logger.info(f"Ticket ID: {ticket_id} 狀態更新成功為 {new_status}。狀態碼: {response.status_code}")
-        return True
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"更新 Ticket ID: {ticket_id} 狀態失敗：HTTP 錯誤：{e.response.status_code} - {e.response.text}")
-    except requests.exceptions.RequestException as e:
-        logger.error(f"更新 Ticket ID: {ticket_id} 狀態失敗：請求錯誤：{e}")
-    return False
-
-def bulk_process_tickets(csv_path, base_url, domain_id, token):
-    """
-    處理批次更新票證的核心函數，根據 CSV 中的 'action_type' 執行不同操作。
-    """
-    logger.info(f"正在讀取 CSV 檔案：{csv_path}")
-    try:
-        df = pd.read_csv(csv_path)
-    except FileNotFoundError:
-        logger.error(f"錯誤：找不到 CSV 檔案：{csv_path}")
-        return
-    except Exception as e:
-        logger.error(f"讀取 CSV 檔案時發生錯誤：{e}")
-        return
-
-    # 過濾掉沒有 ticket_id 的行，或者根據其他條件篩選
-    # 沿用 Part 2 的篩選邏輯，如果需要可以修改
-    # filtered_rows = df[(df['task'] == "Review") & (df['rule_disabled'] == True)]
-    # 這裡我們假設 CSV 已經包含了所有要處理的票證，不再進行額外篩選
-    
-    processed_count = 0
-    failed_count = 0
-
-    for index, row in df.iterrows():
-        ticket_id = row.get('ticket_id')
-        action_type = row.get('action_type')
-        workflow_id = row.get('workflow_id') # 假設 CSV 中有 workflow_id
-        packet_task_id = row.get('packet_task_id') # 假設 CSV 中有 packet_task_id
-
-        if not all([ticket_id, action_type, workflow_id, packet_task_id]):
-            logger.warning(f"跳過第 {index+2} 行：缺少必要的 'ticket_id', 'action_type', 'workflow_id' 或 'packet_task_id'。")
-            failed_count += 1
-            continue
+    def _make_request(self, method: str, url: str, **kwargs) -> requests.Response:
+        """通用的 API 請求方法"""
+        if self._token:
+            self.session.headers.update({"X-FM-Auth-Token": self.token})
         
-        # 轉換 ticket_id, workflow_id, packet_task_id 為字串，以防萬一
-        ticket_id = str(int(ticket_id)) # 確保是整數再轉字串
-        workflow_id = str(workflow_id)
-        packet_task_id = str(packet_task_id)
+        try:
+            response = self.session.request(method, url, **kwargs)
+            response.raise_for_status()
+            return response
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 401:
+                logger.warning("Token 可能已過期，嘗試重新認證...")
+                self._token = None
+                self._authenticate()
+                return self._make_request(method, url, **kwargs)
+            raise FireMonRequestError(f"API 請求失敗 (HTTP {e.response.status_code}): {e.response.text}")
+        except requests.exceptions.RequestException as e:
+            raise FireMonRequestError(f"API 請求失敗: {e}")
+    
+    @retry_on_failure(max_attempts=3, delay=1.0)
+    def update_ticket_variables(self, ticket_id: str, workflow_id: str, 
+                               packet_task_id: str, variables: Dict[str, Any]) -> bool:
+        """更新票證變數"""
+        url = (f"{self.base_url}/policysoptimizer/api/v2/workflow/"
+               f"{workflow_id}@{self.domain_id}/packet/{packet_task_id}/task/{ticket_id}")
+        
+        payload = {"variables": variables}
+        logger.info(f"更新 Ticket ID: {ticket_id} 的變數...")
+        
+        try:
+            self._make_request("PUT", url, json=payload)
+            logger.info(f"Ticket ID: {ticket_id} 變數更新成功")
+            return True
+        except FireMonRequestError as e:
+            logger.error(f"更新 Ticket ID: {ticket_id} 失敗: {e}")
+            return False
+    
+    @retry_on_failure(max_attempts=3, delay=1.0)
+    def assign_ticket(self, ticket_id: str, workflow_id: str, 
+                     packet_task_id: str, assigned_user_id: str) -> bool:
+        """指派票證給使用者"""
+        url = (f"{self.base_url}/policysoptimizer/api/v2/workflow/"
+               f"{workflow_id}@{self.domain_id}/packet/{packet_task_id}/task/{ticket_id}/assign")
+        
+        payload = {"assignedTo": assigned_user_id}
+        logger.info(f"指派 Ticket ID: {ticket_id} 給使用者: {assigned_user_id}...")
+        
+        try:
+            self._make_request("PUT", url, json=payload)
+            logger.info(f"Ticket ID: {ticket_id} 指派成功")
+            return True
+        except FireMonRequestError as e:
+            logger.error(f"指派 Ticket ID: {ticket_id} 失敗: {e}")
+            return False
+    
+    @retry_on_failure(max_attempts=3, delay=1.0)
+    def update_ticket_status(self, ticket_id: str, workflow_id: str, 
+                            packet_task_id: str, new_status: str) -> bool:
+        """更新票證狀態"""
+        return self.update_ticket_variables(
+            ticket_id, workflow_id, packet_task_id, 
+            {"status": new_status}
+        )
 
 
-        logger.info(f"處理 Ticket ID: {ticket_id}, 動作類型: {action_type}...")
-
+class TicketProcessor:
+    """票證批次處理器"""
+    
+    def __init__(self, client: FireMonClient):
+        self.client = client
+        self.processed_count = 0
+        self.failed_count = 0
+    
+    def process_csv(self, csv_path: str) -> None:
+        """處理 CSV 檔案中的票證"""
+        logger.info(f"讀取 CSV 檔案: {csv_path}")
+        
+        try:
+            df = pd.read_csv(csv_path)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"找不到 CSV 檔案: {csv_path}")
+        except Exception as e:
+            raise Exception(f"讀取 CSV 檔案失敗: {e}")
+        
+        for index, row in df.iterrows():
+            self._process_single_ticket(row, index + 2)
+        
+        logger.info(
+            f"批次處理完成！成功: {self.processed_count} 筆, "
+            f"失敗: {self.failed_count} 筆"
+        )
+    
+    def _process_single_ticket(self, row: pd.Series, row_number: int) -> None:
+        """處理單一票證"""
+        ticket_info = self._validate_ticket_info(row, row_number)
+        if not ticket_info:
+            return
+        
+        action_type = ticket_info['action_type']
         success = False
-        if action_type == 'update_vars': # 更新通用變數
-            variables_to_update = {}
-            # 遍歷 CSV 行中除了核心 ID 和 action_type 以外的欄位，作為要更新的變數
-            for col_name, value in row.items():
-                if col_name not in ['ticket_id', 'action_type', 'workflow_id', 'packet_task_id'] and pd.notna(value):
-                    variables_to_update[col_name] = value
-            
-            # 這裡需要一個方法先 GET 該 ticket_id 的所有變數，然後再更新
-            # 因為 FireMon API 的 PUT 可能需要傳送所有變數，而不是只傳送要更新的
-            # 為簡化，如果你的 API 允許 partial update 或你知道所有變數，可以跳過 GET
-            # 否則，你應該像這樣獲取現有變數：
-            # current_ticket_data = get_ticket_details(base_url, domain_id, ticket_id, token)
-            # if current_ticket_data and 'variables' in current_ticket_data:
-            #     existing_vars = current_ticket_data['variables']
-            #     existing_vars.update(variables_to_update)
-            #     success = update_ticket_variables(base_url, domain_id, ticket_id, workflow_id, packet_task_id, existing_vars, token)
-            # else:
-            #     logger.error(f"無法獲取 Ticket ID: {ticket_id} 的現有變數。")
-            #     failed_count += 1
-            #     continue
-            
-            # 簡化版：直接傳送 CSV 中定義的變數，假設 API 會處理
-            success = update_ticket_variables(base_url, domain_id, ticket_id, workflow_id, packet_task_id, variables_to_update, token)
-
-        elif action_type == 'assign_ticket': # 指派票證
-            assigned_user_id = row.get('assigned_to')
-            if pd.notna(assigned_user_id):
-                success = assign_ticket(base_url, domain_id, ticket_id, workflow_id, packet_task_id, str(assigned_user_id), token)
-            else:
-                logger.warning(f"Ticket ID: {ticket_id} 的 'assign_ticket' 動作缺少 'assigned_to' 欄位。")
-
-        elif action_type == 'complete_ticket': # 完成票證 (或更新狀態)
-            new_status = row.get('new_status')
-            if pd.notna(new_status):
-                success = complete_ticket(base_url, domain_id, ticket_id, workflow_id, packet_task_id, str(new_status), token)
-            else:
-                logger.warning(f"Ticket ID: {ticket_id} 的 'complete_ticket' 動作缺少 'new_status' 欄位。")
         
-        # 你可以在這裡添加更多 'elif action_type == '其他類型':' 的判斷
-        # 例如：'add_comment', 'change_priority' 等等，並呼叫對應的 API 函數
-
+        action_handlers = {
+            'update_vars': self._handle_update_vars,
+            'assign_ticket': self._handle_assign_ticket,
+            'complete_ticket': self._handle_complete_ticket,
+        }
+        
+        handler = action_handlers.get(action_type)
+        if handler:
+            success = handler(ticket_info, row)
         else:
-            logger.warning(f"Ticket ID: {ticket_id} 的 'action_type': '{action_type}' 不支援。")
-            failed_count += 1
-            continue
-
+            logger.warning(
+                f"不支援的 action_type: '{action_type}' "
+                f"(Ticket ID: {ticket_info['ticket_id']})"
+            )
+            self.failed_count += 1
+            return
+        
         if success:
-            processed_count += 1
+            self.processed_count += 1
         else:
-            failed_count += 1
+            self.failed_count += 1
+    
+    def _validate_ticket_info(self, row: pd.Series, row_number: int) -> Optional[Dict[str, str]]:
+        """驗證票證資訊的完整性"""
+        required_fields = ['ticket_id', 'action_type', 'workflow_id', 'packet_task_id']
+        ticket_info = {}
+        
+        for field in required_fields:
+            value = row.get(field)
+            if pd.isna(value):
+                logger.warning(f"第 {row_number} 行缺少必要欄位: {field}")
+                self.failed_count += 1
+                return None
+            ticket_info[field] = str(value)
+        
+        return ticket_info
+    
+    def _handle_update_vars(self, ticket_info: Dict[str, str], row: pd.Series) -> bool:
+        """處理更新變數的動作"""
+        variables_to_update = {}
+        excluded_fields = ['ticket_id', 'action_type', 'workflow_id', 'packet_task_id']
+        
+        for col_name, value in row.items():
+            if col_name not in excluded_fields and pd.notna(value):
+                variables_to_update[col_name] = value
+        
+        if not variables_to_update:
+            logger.warning(f"Ticket ID: {ticket_info['ticket_id']} 沒有要更新的變數")
+            return False
+        
+        return self.client.update_ticket_variables(
+            ticket_info['ticket_id'],
+            ticket_info['workflow_id'],
+            ticket_info['packet_task_id'],
+            variables_to_update
+        )
+    
+    def _handle_assign_ticket(self, ticket_info: Dict[str, str], row: pd.Series) -> bool:
+        """處理指派票證的動作"""
+        assigned_to = row.get('assigned_to')
+        if pd.isna(assigned_to):
+            logger.warning(
+                f"Ticket ID: {ticket_info['ticket_id']} 的 'assign_ticket' "
+                f"動作缺少 'assigned_to' 欄位"
+            )
+            return False
+        
+        return self.client.assign_ticket(
+            ticket_info['ticket_id'],
+            ticket_info['workflow_id'],
+            ticket_info['packet_task_id'],
+            str(assigned_to)
+        )
+    
+    def _handle_complete_ticket(self, ticket_info: Dict[str, str], row: pd.Series) -> bool:
+        """處理完成票證的動作"""
+        new_status = row.get('new_status')
+        if pd.isna(new_status):
+            logger.warning(
+                f"Ticket ID: {ticket_info['ticket_id']} 的 'complete_ticket' "
+                f"動作缺少 'new_status' 欄位"
+            )
+            return False
+        
+        return self.client.update_ticket_status(
+            ticket_info['ticket_id'],
+            ticket_info['workflow_id'],
+            ticket_info['packet_task_id'],
+            str(new_status)
+        )
 
-    logger.info(f"批次更新完成！成功處理 {processed_count} 筆，失敗 {failed_count} 筆。")
+
+def load_config() -> Tuple[str, str, str, str]:
+    """載入環境變數設定"""
+    load_dotenv()
+    
+    config = {
+        'base_url': os.getenv("FIREMON_BASE_URL"),
+        'user_id': os.getenv("FIREMON_USER_ID"),
+        'password': os.getenv("FIREMON_PASSWORD"),
+        'domain_id': os.getenv("FIREMON_DOMAIN_ID")
+    }
+    
+    missing_vars = [k for k, v in config.items() if not v]
+    if missing_vars:
+        raise ValueError(
+            f"缺少必要的環境變數: {', '.join(missing_vars)}. "
+            f"請檢查 .env 檔案"
+        )
+    
+    return (config['base_url'], config['user_id'], 
+            config['password'], config['domain_id'])
+
+
+def main():
+    """主程式進入點"""
+    try:
+        base_url, user_id, password, domain_id = load_config()
+        
+        client = FireMonClient(base_url, user_id, password, domain_id)
+        
+        processor = TicketProcessor(client)
+        processor.process_csv('bulk_updates.csv')
+        
+    except FileNotFoundError as e:
+        logger.error(f"檔案錯誤: {e}")
+        return 1
+    except FireMonAuthError as e:
+        logger.critical(f"認證錯誤: {e}")
+        return 2
+    except FireMonAPIError as e:
+        logger.error(f"API 錯誤: {e}")
+        return 3
+    except Exception as e:
+        logger.critical(f"未預期的錯誤: {e}")
+        return 4
+    
+    return 0
 
 
 if __name__ == "__main__":
-    # --- 1. 載入設定 ---
-    BASE_URL, USER_ID, PASSWORD, DOMAIN_ID = load_config()
-
-    # --- 2. 獲取 API Token ---
-    AUTH_TOKEN = get_auth_token(BASE_URL, USER_ID, PASSWORD)
-
-    if AUTH_TOKEN:
-        # --- 3. 執行批次更新 ---
-        # 請確保你的 CSV 檔案名稱正確，且包含 'ticket_id', 'action_type' 等欄位
-        # 範例 CSV 檔案名稱為 'bulk_updates.csv'
-        bulk_process_tickets(
-            csv_path='bulk_updates.csv',
-            base_url=BASE_URL,
-            domain_id=DOMAIN_ID,
-            token=AUTH_TOKEN
-        )
-    else:
-        logger.critical("無法獲取 API Token，腳本終止。")
+    exit(main())
