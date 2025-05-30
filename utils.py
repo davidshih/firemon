@@ -9,6 +9,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from selenium.webdriver.common.by import By
 
 def setup_logging(config: Dict[str, Any]) -> logging.Logger:
     """設置日誌系統"""
@@ -111,3 +112,108 @@ class Timer:
         print(f"計時結束: {self.end_time.strftime('%H:%M:%S')}")
         print(f"總耗時: {duration.total_seconds():.2f} 秒")
         return duration.total_seconds()
+
+class WebDriverHelper:
+    """WebDriver 輔助工具類"""
+    
+    @staticmethod
+    def wait_for_element(driver, by, value, timeout=10):
+        """等待元素出現"""
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        
+        wait = WebDriverWait(driver, timeout)
+        return wait.until(EC.presence_of_element_located((by, value)))
+    
+    @staticmethod
+    def safe_click(driver, element):
+        """安全點擊元素"""
+        try:
+            driver.execute_script("arguments[0].scrollIntoView(true);", element)
+            driver.execute_script("arguments[0].click();", element)
+            return True
+        except Exception as e:
+            print(f"點擊失敗: {e}")
+            return False
+    
+    @staticmethod
+    def take_screenshot(driver, filename):
+        """截圖"""
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            full_filename = f"{filename}_{timestamp}.png"
+            driver.save_screenshot(full_filename)
+            return full_filename
+        except Exception as e:
+            print(f"截圖失敗: {e}")
+            return None
+
+class FireMonHelper:
+    """FireMon 專用輔助工具"""
+    
+    @staticmethod
+    def extract_rule_info(element):
+        """從元素中提取規則資訊"""
+        rule_info = {}
+        
+        try:
+            # 嘗試不同的選擇器來提取規則名稱
+            name_selectors = [".rule-name", ".name", "[class*='name']", "[data-rule-name]"]
+            for selector in name_selectors:
+                try:
+                    name_element = element.find_element(By.CSS_SELECTOR, selector)
+                    rule_info['name'] = name_element.text.strip()
+                    break
+                except:
+                    continue
+            
+            # 嘗試提取其他屬性
+            rule_info['id'] = element.get_attribute('id') or ''
+            rule_info['class'] = element.get_attribute('class') or ''
+            
+        except Exception as e:
+            print(f"提取規則資訊失敗: {e}")
+            
+        return rule_info
+    
+    @staticmethod
+    def find_policy_optimizer_link(driver):
+        """尋找 Policy Optimizer 連結"""
+        selectors = [
+            "//a[contains(text(), 'Policy Optimizer')]",
+            "//a[contains(text(), 'policy optimizer')]",
+            "//a[contains(text(), 'PO')]",
+            "[href*='policy-optimizer']",
+            "[href*='po']"
+        ]
+        
+        from selenium.webdriver.common.by import By
+        
+        for selector in selectors:
+            try:
+                if selector.startswith("//"):
+                    element = driver.find_element(By.XPATH, selector)
+                else:
+                    element = driver.find_element(By.CSS_SELECTOR, selector)
+                return element
+            except:
+                continue
+        
+        return None
+    
+    @staticmethod
+    def find_tickets(driver):
+        """尋找 PO tickets"""
+        ticket_selectors = [".po-ticket", ".ticket", ".policy-ticket", "[class*='ticket']"]
+        
+        from selenium.webdriver.common.by import By
+        
+        for selector in ticket_selectors:
+            try:
+                tickets = driver.find_elements(By.CSS_SELECTOR, selector)
+                if tickets:
+                    return tickets
+            except:
+                continue
+        
+        return []
