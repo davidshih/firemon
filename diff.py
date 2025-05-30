@@ -95,23 +95,23 @@ def create_summary_df(removed_items, added_items):
     
     return pd.DataFrame(summary_data)
 
-# 測試用的範例資料 (基於圖片中的內容)
-sample_log = """
-{'id': 2234893, 'action': 'MODIFY', 'objectType': 'NETWORK_OBJECT', 'objectMatchId': 'bd6b79b9-440f-43aa-9bbe-0d06050043f',
-'objectName': 'Akamai-lb-subnets:local', 'summary': 'Members changed from [N-23.67.78.0:local,N-104.103.70.0:local,N-
-104.120.208.0:local,N-2.19.98.0:local,N-2.20.137.0:local,N-23.14.129.0:local,N-23.192.127.0:local,N-23.198.13.0:local,N-
-23.200.82.0:local,N-23.201.31.0:local,N-23.206.187.0:local,N-23.212.48.0:local,N-23.213.19.0:local,N-23.218.233.0:local,N-
-23.219.171.0:local,N-23.220.104.0:local,N-23.36.66.0:local,N-23.40.189.0:local,N-23.41.246.0:local,N-23.44.98.0:local,N-
-23.45.180.0:local,N-23.45.44.0:local,N-23.47.205.0:local,N-23.47.58.0:local,N-23.48.200.0:local,N-23.52.98.0:local,N-
-23.53.123.0:local,N-23.55.63.0:local,N-23.58.89.0:local,N-23.62.22.0:local,N-23.62.36.0:local,N-23.63.30.0:local,N-
-23.77.200.0:local,N-95.101.237.0:local] to [N-23.67.78.0:local,N-104.103.70.0:local,N-104.120.208.0:local,N-2.19.98.0:local,N-
-2.20.137.0:local,N-23.14.129.0:local,N-23.192.127.0:local,N-23.198.13.0:local,N-23.200.82.0:local,N-23.201.31.0:local,N-
-23.205.103.0:local,N-23.206.187.0:local,N-23.212.111.0:local,N-23.212.48.0:local,N-23.213.19.0:local,N-23.218.233.0:local,N-
-23.219.171.0:local,N-23.219.80.0:local,N-23.220.104.0:local,N-23.36.66.0:local,N-23.40.189.0:local,N-23.41.246.0:local,N-
-23.44.202.0:local,N-23.44.98.0:local,N-23.45.180.0:local,N-23.45.44.0:local,N-23.47.205.0:local,N-23.47.58.0:local,N-
-23.47.59.0:local,N-23.48.200.0:local,N-23.52.98.0:local,N-23.53.10.0:local,N-23.53.123.0:local,N-23.55.63.0:local,N-
-23.58.89.0:local,N-23.62.22.0:local,N-23.62.36.0:local,N-23.63.30.0:local,N-23.77.200.0:local,N-95.101.237.0:local]'}
-"""
+# 測試用的範例資料 - 修正版本
+sample_log = '''Members changed from [N-23.67.78.0:local,N-104.103.70.0:local,N-23.77.200.0:local,N-95.101.237.0:local] to [N-23.67.78.0:local,N-104.103.70.0:local,N-23.205.103.0:local,N-23.212.111.0:local,N-23.77.200.0:local,N-95.101.237.0:local]'''
+
+# 或者如果要處理完整的 JSON 格式
+def parse_json_log(json_text):
+    """
+    處理 JSON 格式的 log 記錄
+    """
+    try:
+        import json
+        # 清理字串，移除多餘的引號和格式
+        cleaned = json_text.strip().replace("'", '"')
+        log_data = json.loads(cleaned)
+        return log_data.get('summary', '')
+    except:
+        # 如果不是標準 JSON，直接當作字串處理
+        return json_text
 
 # 執行解析
 print("🔥 開始解析防火牆變更記錄...")
