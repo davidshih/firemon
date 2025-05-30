@@ -43,26 +43,37 @@ def parse_single_changelog(changelog_text):
     
     return removed_from_old, added_to_new
 
-def process_dataframe_changelogs(df, changelog_column='changeLog'):
+def add_change_columns_to_df(df, changelog_column='changeLog', inplace=True):
     """
-    批量處理 DataFrame 中的 changeLog 欄位
+    直接在原 DataFrame 上新增變更分析欄位
     新增三個欄位：changes, removed, added
-    就像批量處理網管報告一樣有效率 📊
+    就像直接在你的資料上加工一樣！📊
+    
+    參數:
+    - df: 你的 DataFrame
+    - changelog_column: changeLog 欄位名稱 (預設 'changeLog')
+    - inplace: True=直接修改原 df, False=回傳新的 df
     """
-    # 建立新的 DataFrame 副本，避免修改原始資料
-    result_df = df.copy()
+    
+    # 決定要操作哪個 DataFrame
+    if inplace:
+        target_df = df
+        print("🔧 直接在原 DataFrame 上新增欄位...")
+    else:
+        target_df = df.copy()
+        print("📋 建立新的 DataFrame 副本...")
     
     # 初始化新欄位
-    result_df['changes'] = ''
-    result_df['removed'] = ''
-    result_df['added'] = ''
+    target_df['changes'] = ''
+    target_df['removed'] = ''
+    target_df['added'] = ''
     
-    print(f"🔥 開始處理 {len(df)} 筆 changeLog 記錄...")
+    print(f"🔥 開始處理 {len(target_df)} 筆 {changelog_column} 記錄...")
     
     processed_count = 0
     changes_found = 0
     
-    for idx, row in result_df.iterrows():
+    for idx, row in target_df.iterrows():
         changelog = row[changelog_column]
         
         # 解析變更記錄
@@ -81,22 +92,27 @@ def process_dataframe_changelogs(df, changelog_column='changeLog'):
             added_text = ',\n'.join(added_list) if added_list else ''
             
             # 更新 DataFrame
-            result_df.at[idx, 'changes'] = change_summary
-            result_df.at[idx, 'removed'] = removed_text
-            result_df.at[idx, 'added'] = added_text
+            target_df.at[idx, 'changes'] = change_summary
+            target_df.at[idx, 'removed'] = removed_text
+            target_df.at[idx, 'added'] = added_text
         
         processed_count += 1
         
         # 顯示進度 (每處理100筆顯示一次)
         if processed_count % 100 == 0:
-            print(f"   已處理 {processed_count}/{len(df)} 筆...")
+            print(f"   已處理 {processed_count}/{len(target_df)} 筆...")
     
     print(f"✅ 處理完成！")
     print(f"   總共處理: {processed_count} 筆記錄")
     print(f"   找到變更: {changes_found} 筆")
     print(f"   無變更:   {processed_count - changes_found} 筆")
     
-    return result_df
+    if inplace:
+        print("📊 新欄位已直接加到你的原始 DataFrame！")
+        return None  # inplace 模式不回傳任何東西
+    else:
+        print("📊 回傳新的 DataFrame，原始資料保持不變")
+        return target_df
 
 def get_change_statistics(df):
     """
@@ -159,31 +175,46 @@ def demo_usage():
     result_df.to_csv('processed_changes.csv', index=False)
     """)
 
-# 測試用資料
-print("🧪 建立測試資料...")
-test_data = {
-    'id': [1, 2, 3, 4],
-    'objectName': ['test-subnet1', 'test-subnet2', 'test-subnet3', 'test-subnet4'],
-    'changeLog': [
-        'Members changed from [N-192.168.1.0:local,N-192.168.2.0:local,N-192.168.3.0:local] to [N-192.168.1.0:local,N-192.168.4.0:local,N-192.168.5.0:local]',
-        'Members changed from [N-10.0.1.0:local,N-10.0.2.0:local] to [N-10.0.1.0:local]',
-        'No network changes detected',
-        'Members changed from [A,B] to [A,B,C,D,E]'
-    ]
-}
+# 🎯 超簡單使用方式
+print("🎯 如何使用 - 直接在你的 DataFrame 上新增欄位：")
+print("="*60)
+print("""
+# 方法1: 直接修改原 DataFrame (推薦！)
+add_change_columns_to_df(df)                    # 使用預設欄位名 'changeLog'
+add_change_columns_to_df(df, 'your_column')     # 如果你的欄位名不同
 
+# 方法2: 建立新的 DataFrame (保留原始資料)
+new_df = add_change_columns_to_df(df, inplace=False)
+
+# 處理完後，你的 df 就會有新欄位：
+# df['changes'] - 變更摘要
+# df['removed'] - 移除的項目
+# df['added']   - 新增的項目
+""")
+
+print("\n🧪 實際測試...")
+print("="*60)
+
+# 真實使用示範
+print("1️⃣ 建立測試 DataFrame")
 df = pd.DataFrame(test_data)
-print("\n📋 原始資料：")
-print(df)
+print("原始 df 欄位:", list(df.columns))
 
-print("\n🔥 開始批量處理...")
-result_df = process_dataframe_changelogs(df, 'changeLog')
+print("\n2️⃣ 直接在 df 上新增變更分析欄位")
+add_change_columns_to_df(df)  # 直接修改原始 df
 
-print("\n📊 處理結果：")
-print(result_df[['id', 'objectName', 'changes', 'removed', 'added']])
+print("\n3️⃣ 查看結果 - df 現在有新欄位了！")
+print("新的 df 欄位:", list(df.columns))
+print("\n前3筆資料的變更分析：")
+print(df[['id', 'changes', 'removed', 'added']].head(3))
 
-print("\n📈 統計報告：")
-stats = get_change_statistics(result_df)
+print("\n4️⃣ 檢查某筆詳細的新增項目 (formatted with line breaks):")
+if len(df[df['added'] != '']) > 0:
+    sample_row = df[df['added'] != ''].iloc[0]
+    print(f"ID {sample_row['id']} 的新增項目：")
+    print(sample_row['added'])
+
+print("\n🎉 完成！你的原始 df 現在有 changes, removed, added 三個新欄位了！")
 
 print("\n💡 使用提示：")
 demo_usage()
