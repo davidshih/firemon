@@ -1,194 +1,191 @@
 import pandas as pd
 import re
-import json
 
-def parse_firewall_changes(log_text):
+def parse_single_changelog(changelog_text):
     """
-    解析防火牆變更記錄，提取變更前後的差異
-    修正版：處理多行格式和正確解析差異 🔍
+    解析單一 changelog 記錄，回傳 (removed_list, added_list)
+    專門處理 DataFrame 中的單筆記錄 🔍
     """
+    if pd.isna(changelog_text) or not changelog_text:
+        return [], []
     
-    # 移除換行符號和多餘空格，讓正則表達式更容易匹配
-    cleaned_text = re.sub(r'\s+', ' ', log_text.replace('\n', ' ').replace('\r', ''))
+    # 移除換行符號和多餘空格
+    cleaned_text = re.sub(r'\s+', ' ', str(changelog_text).replace('\n', ' ').replace('\r', ''))
     
-    # 更強化的正則表達式，處理可能的格式變化
+    # 正則表達式找出變更模式
     pattern = r"Members changed from \[(.*?)\] to \[(.*?)\]"
     match = re.search(pattern, cleaned_text, re.DOTALL)
     
     if not match:
-        print("找不到變更記錄，是不是網管偷懶沒寫清楚？ 🤔")
-        print("原始文字前100字元:", log_text[:100])
-        return None, None, None
+        return [], []
     
     old_members = match.group(1)
     new_members = match.group(2)
     
-    print(f"🔍 Debug - 找到的舊成員: {old_members[:100]}...")
-    print(f"🔍 Debug - 找到的新成員: {new_members[:100]}...")
-    
-    # 更仔細地解析成員清單，處理可能的格式問題
+    # 解析成員清單
     def parse_members(member_string):
-        # 移除多餘空格，然後用逗號分割
         items = []
         for item in member_string.split(','):
             cleaned_item = item.strip()
-            if cleaned_item:  # 只加入非空的項目
+            if cleaned_item:
                 items.append(cleaned_item)
         return items
     
     old_list = parse_members(old_members)
     new_list = parse_members(new_members)
     
-    print(f"📊 解析結果 - 舊清單: {len(old_list)} 項目")
-    print(f"📊 解析結果 - 新清單: {len(new_list)} 項目")
-    
-    # 轉換成集合來比較差異
+    # 計算差異
     old_set = set(old_list)
     new_set = set(new_list)
     
-    # 計算差異
-    removed_from_old = old_set - new_set  # 從舊的移除的項目
-    added_to_new = new_set - old_set      # 新增的項目
+    removed_from_old = list(old_set - new_set)
+    added_to_new = list(new_set - old_set)
     
-    # 建立結果 DataFrame
-    results = []
-    
-    # 處理移除的項目
-    for item in removed_from_old:
-        results.append({
-            'change_type': 'removed',
-            'member': item,
-            'removed_from_old': item,
-            'added_to_new': ''
-        })
-    
-    # 處理新增的項目
-    for item in added_to_new:
-        results.append({
-            'change_type': 'added',
-            'member': item,
-            'removed_from_old': '',
-            'added_to_new': item
-        })
-    
-    # 處理沒有變更的項目 (保持不變)
-    unchanged = old_set & new_set
-    for item in unchanged:
-        results.append({
-            'change_type': 'unchanged',
-            'member': item,
-            'removed_from_old': '',
-            'added_to_new': ''
-        })
-    
-    df = pd.DataFrame(results)
-    
-    # 顯示統計資訊
-    print(f"📊 變更統計：")
-    print(f"   移除項目：{len(removed_from_old)} 個")
-    print(f"   新增項目：{len(added_to_new)} 個")
-    print(f"   不變項目：{len(unchanged)} 個")
-    print(f"   總共處理：{len(results)} 筆記錄")
-    
-    return df, removed_from_old, added_to_new
+    return removed_from_old, added_to_new
 
-def format_changes_output(removed_set, added_set):
+def process_dataframe_changelogs(df, changelog_column='changeLog'):
     """
-    格式化變更輸出，removed 顯示為清單，added 用逗號分隔換行
-    就像給老闆看的報告一樣整齊 📋
+    批量處理 DataFrame 中的 changeLog 欄位
+    新增三個欄位：changes, removed, added
+    就像批量處理網管報告一樣有效率 📊
     """
-    print("\n" + "="*60)
-    print("🔥 防火牆變更詳細報告")
-    print("="*60)
+    # 建立新的 DataFrame 副本，避免修改原始資料
+    result_df = df.copy()
     
-    print(f"\n❌ 移除的項目 (removed_from_old): {len(removed_set)} 個")
-    if removed_set:
-        for item in sorted(removed_set):
-            print(f"  - {item}")
-    else:
-        print("  (沒有移除任何項目)")
+    # 初始化新欄位
+    result_df['changes'] = ''
+    result_df['removed'] = ''
+    result_df['added'] = ''
     
-    print(f"\n✅ 新增的項目 (added_to_new): {len(added_set)} 個")
-    if added_set:
-        # 按照你的要求：移除括號，用逗號換行
-        sorted_added = sorted(added_set)
-        for i, item in enumerate(sorted_added):
-            if i == len(sorted_added) - 1:  # 最後一個不加逗號
-                print(f"  {item}")
-            else:
-                print(f"  {item},")
-    else:
-        print("  (沒有新增任何項目)")
-
-def create_formatted_df(removed_set, added_set):
-    """
-    建立格式化的 DataFrame，專門用於匯出
-    """
-    # 計算最大長度
-    max_len = max(len(removed_set), len(added_set))
+    print(f"🔥 開始處理 {len(df)} 筆 changeLog 記錄...")
     
-    # 準備資料
-    removed_list = list(sorted(removed_set)) + [''] * (max_len - len(removed_set))
-    added_list = list(sorted(added_set)) + [''] * (max_len - len(added_set))
+    processed_count = 0
+    changes_found = 0
     
-    # 建立 DataFrame
-    df = pd.DataFrame({
-        'removed_from_old': removed_list,
-        'added_to_new': added_list
-    })
-    
-    return df
-
-# 測試用的範例資料 - 修正版本
-sample_log = '''Members changed from [N-23.67.78.0:local,N-104.103.70.0:local,N-23.77.200.0:local,N-95.101.237.0:local] to [N-23.67.78.0:local,N-104.103.70.0:local,N-23.205.103.0:local,N-23.212.111.0:local,N-23.77.200.0:local,N-95.101.237.0:local]'''
-
-# 或者如果要處理完整的 JSON 格式
-def parse_json_log(json_text):
-    """
-    處理 JSON 格式的 log 記錄
-    """
-    try:
-        import json
-        # 清理字串，移除多餘的引號和格式
-        cleaned = json_text.strip().replace("'", '"')
-        log_data = json.loads(cleaned)
-        return log_data.get('summary', '')
-    except:
-        # 如果不是標準 JSON，直接當作字串處理
-        return json_text
-
-# 執行解析
-print("🔥 開始解析防火牆變更記錄...")
-print("=" * 50)
-
-result_df, removed, added = parse_firewall_changes(sample_log)
-
-if result_df is not None:
-    print("\n📋 完整變更記錄：")
-    print(result_df.head(10).to_string(index=False))  # 只顯示前10行避免太長
-    
-    # 使用新的格式化輸出
-    format_changes_output(removed, added)
-    
-    print("\n📊 摘要 DataFrame (適合匯出)：")
-    summary_df = create_formatted_df(removed, added)
-    print(summary_df.head(10).to_string(index=False))
-    
-    # 如果你想要儲存結果
-    print("\n💾 想要儲存結果嗎？取消註解下面的程式碼：")
-    print("# result_df.to_csv('firewall_changes_detail.csv', index=False)")
-    print("# summary_df.to_csv('firewall_changes_summary.csv', index=False)")
-    
-    # 特別檢查 removed 是否真的是空的
-    if len(removed) == 0:
-        print("\n⚠️  注意：removed_from_old 是空的！")
-        print("    這可能表示：")
-        print("    1. 真的沒有移除任何項目（只有新增）")
-        print("    2. 正則表達式沒有正確解析到資料")
-        print("    3. 資料格式跟預期不同")
+    for idx, row in result_df.iterrows():
+        changelog = row[changelog_column]
         
-else:
-    print("❌ 解析失敗！請檢查輸入資料格式")
+        # 解析變更記錄
+        removed_list, added_list = parse_single_changelog(changelog)
+        
+        if removed_list or added_list:
+            changes_found += 1
+            
+            # 格式化變更摘要
+            change_summary = f"移除:{len(removed_list)}項, 新增:{len(added_list)}項"
+            
+            # 格式化移除項目 (用逗號分隔)
+            removed_text = ', '.join(removed_list) if removed_list else ''
+            
+            # 格式化新增項目 (按你要求的格式：逗號換行)
+            added_text = ',\n'.join(added_list) if added_list else ''
+            
+            # 更新 DataFrame
+            result_df.at[idx, 'changes'] = change_summary
+            result_df.at[idx, 'removed'] = removed_text
+            result_df.at[idx, 'added'] = added_text
+        
+        processed_count += 1
+        
+        # 顯示進度 (每處理100筆顯示一次)
+        if processed_count % 100 == 0:
+            print(f"   已處理 {processed_count}/{len(df)} 筆...")
+    
+    print(f"✅ 處理完成！")
+    print(f"   總共處理: {processed_count} 筆記錄")
+    print(f"   找到變更: {changes_found} 筆")
+    print(f"   無變更:   {processed_count - changes_found} 筆")
+    
+    return result_df
 
-print("\n🎉 解析完成！")
-print("如果 removed 還是顯示 set()，請提供完整的原始 log 文字，我們來除錯一下 🔧")
+def get_change_statistics(df):
+    """
+    統計變更資料，產生報表
+    給老闆看的數據總結 📈
+    """
+    stats = {
+        'total_records': len(df),
+        'records_with_changes': len(df[df['changes'] != '']),
+        'total_removed_items': 0,
+        'total_added_items': 0
+    }
+    
+    # 計算總移除和新增項目數
+    for idx, row in df.iterrows():
+        if row['removed']:
+            stats['total_removed_items'] += len(row['removed'].split(','))
+        if row['added']:
+            stats['total_added_items'] += len(row['added'].split(',\n'))
+    
+    print(f"\n📊 變更統計報告：")
+    print(f"   總記錄數: {stats['total_records']}")
+    print(f"   有變更的記錄: {stats['records_with_changes']}")
+    print(f"   總移除項目: {stats['total_removed_items']}")
+    print(f"   總新增項目: {stats['total_added_items']}")
+    
+    return stats
+
+# 使用範例
+def demo_usage():
+    """
+    示範如何使用這個批量處理器
+    """
+    print("🎯 使用範例：")
+    print("""
+    # 假設你有一個 DataFrame
+    df = pd.read_csv('your_firewall_logs.csv')
+    
+    # 或者手動建立測試資料
+    test_data = {
+        'id': [1, 2, 3],
+        'changeLog': [
+            'Members changed from [A,B,C] to [A,B,D,E]',
+            'Members changed from [X,Y] to [X]',
+            'No changes detected'
+        ]
+    }
+    df = pd.DataFrame(test_data)
+    
+    # 處理 changeLog 欄位
+    result_df = process_dataframe_changelogs(df, 'changeLog')
+    
+    # 查看結果
+    print(result_df[['id', 'changes', 'removed', 'added']])
+    
+    # 產生統計報告
+    stats = get_change_statistics(result_df)
+    
+    # 儲存結果
+    result_df.to_csv('processed_changes.csv', index=False)
+    """)
+
+# 測試用資料
+print("🧪 建立測試資料...")
+test_data = {
+    'id': [1, 2, 3, 4],
+    'objectName': ['test-subnet1', 'test-subnet2', 'test-subnet3', 'test-subnet4'],
+    'changeLog': [
+        'Members changed from [N-192.168.1.0:local,N-192.168.2.0:local,N-192.168.3.0:local] to [N-192.168.1.0:local,N-192.168.4.0:local,N-192.168.5.0:local]',
+        'Members changed from [N-10.0.1.0:local,N-10.0.2.0:local] to [N-10.0.1.0:local]',
+        'No network changes detected',
+        'Members changed from [A,B] to [A,B,C,D,E]'
+    ]
+}
+
+df = pd.DataFrame(test_data)
+print("\n📋 原始資料：")
+print(df)
+
+print("\n🔥 開始批量處理...")
+result_df = process_dataframe_changelogs(df, 'changeLog')
+
+print("\n📊 處理結果：")
+print(result_df[['id', 'objectName', 'changes', 'removed', 'added']])
+
+print("\n📈 統計報告：")
+stats = get_change_statistics(result_df)
+
+print("\n💡 使用提示：")
+demo_usage()
+
+print("\n🎉 批量處理完成！現在你可以用同樣方式處理你的真實資料了 😄")
